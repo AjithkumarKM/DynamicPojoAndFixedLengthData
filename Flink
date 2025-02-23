@@ -1,0 +1,9 @@
+String joinQuery = String.format(
+    "SELECT * FROM (" +
+    " SELECT c1.*, c2.* " +
+    " FROM %s_source AS c1 " +
+    " LEFT JOIN %s_source AS c2 ON c1.key = c2.key " +
+    " WHERE c2.key IS NULL OR c1.checksum <> c2.checksum" +
+    ") AS snapshot",
+    collectionName, currentViewName
+);
