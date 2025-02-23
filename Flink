@@ -7,3 +7,182 @@ String joinQuery = String.format(
     ") AS snapshot",
     collectionName, currentViewName
 );
+
+
+If you want to process the data after the join (instead of inserting it directly into a sink), you can convert the query result into a DataStream while ensuring insert-only semantics to avoid the update/delete error.
+
+
+---
+
+✅ Solution: Use tableEnv.toChangelogStream() with Insert-Only Filter
+
+Here’s the full code where you:
+
+1. Execute the join query.
+
+
+2. Convert it into a changelog stream.
+
+
+3. Filter out non-insert changes to prevent errors.
+
+
+4. Process the resulting DataStream.
+
+
+
+
+---
+
+📝 Full Working Code
+
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.EnvironmentSettings;
+import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+import org.apache.flink.types.Row;
+import org.apache.flink.types.RowKind;
+
+public class FlinkJoinProcessExample {
+    public static void main(String[] args) throws Exception {
+        // Set up the streaming environment
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        EnvironmentSettings settings = EnvironmentSettings.newInstance().inStreamingMode().build();
+        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env, settings);
+
+        String collectionName = "collectionA";
+        String currentViewName = "collectionB";
+
+        // Create source tables (replace with actual MongoDB configurations)
+        tableEnv.executeSql(
+            "CREATE TABLE " + collectionName + "_source (" +
+            " key STRING," +
+            " checksum STRING," +
+            " value STRING," +
+            " businessDate STRING," +
+            " processedDate STRING," +
+            " version INT" +
+            ") WITH (" +
+            " 'connector' = 'mongodb'," +
+            " 'uri' = 'mongodb://localhost:27017'," +
+            " 'database' = 'yourDatabase'," +
+            " 'collection' = '" + collectionName + "'" +
+            ")"
+        );
+
+        tableEnv.executeSql(
+            "CREATE TABLE " + currentViewName + "_source (" +
+            " key STRING," +
+            " checksum STRING," +
+            " value STRING," +
+            " businessDate STRING," +
+            " processedDate STRING," +
+            " version INT" +
+            ") WITH (" +
+            " 'connector' = 'mongodb'," +
+            " 'uri' = 'mongodb://localhost:27017'," +
+            " 'database' = 'yourDatabase'," +
+            " 'collection' = '" + currentViewName + "'" +
+            ")"
+        );
+
+        // Join query
+        String joinQuery = String.format(
+            "SELECT c1.*, c2.* " +
+            "FROM %s_source AS c1 " +
+            "LEFT JOIN %s_source AS c2 " +
+            "ON c1.key = c2.key " +
+            "WHERE c2.key IS NULL OR c1.checksum <> c2.checksum",
+            collectionName, currentViewName
+        );
+
+        // Execute the join query
+        Table joinQueryResult = tableEnv.sqlQuery(joinQuery);
+
+        // ✅ Convert the Table to a changelog DataStream
+        DataStream<Row> changelogStream = tableEnv.toChangelogStream(joinQueryResult);
+
+        // ✅ Filter only INSERT events to avoid update/delete errors
+        DataStream<Row> insertOnlyStream = changelogStream
+            .filter(row -> row.getKind() == RowKind.INSERT)
+            .assignTimestampsAndWatermarks(WatermarkStrategy.noWatermarks());
+
+        // 🔥 Process the DataStream (example: print or apply transformations)
+        insertOnlyStream.map(row -> {
+            String key = row.getFieldAs("key");
+            String checksum = row.getFieldAs("checksum");
+            return "Processed Record -> Key: " + key + ", Checksum: " + checksum;
+        }).print();
+
+        // Execute the environment
+        env.execute("Flink Join Processing Example");
+    }
+}
+
+
+---
+
+🔍 Explanation:
+
+1. Source Tables:
+
+Replace CREATE TABLE with your MongoDB connector configurations.
+
+
+
+2. Join Query:
+
+Selects records where:
+
+c2.key IS NULL: Keys missing in the second table.
+
+c1.checksum <> c2.checksum: Checksums differ between the two tables.
+
+
+
+
+3. Convert to Changelog Stream:
+
+tableEnv.toChangelogStream(joinQueryResult) captures all changes (INSERT, UPDATE, DELETE).
+
+
+
+4. Filter INSERT Events:
+
+row.getKind() == RowKind.INSERT ensures only insert records pass through.
+
+✅ Prevents update/delete errors during processing.
+
+
+
+5. Process the Stream:
+
+Example: map() transforms records, and print() displays them.
+
+Replace with any processing logic you need (e.g., windowing, aggregations, or sinks).
+
+
+
+6. Timestamps & Watermarks:
+
+WatermarkStrategy.noWatermarks() used for simplicity. Add proper strategies for event-time processing.
+
+
+
+
+
+---
+
+🚀 Result:
+
+✅ No update/delete errors
+✅ You process the joined data freely in a DataStream
+✅ Insert-only records ensure stable processing
+
+
+---
+
+🔔 Let me know if you need further processing examples (like windowing or sink integration)!
+
