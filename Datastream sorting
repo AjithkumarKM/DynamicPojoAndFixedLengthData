@@ -1,0 +1,52 @@
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.Collector;
+
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+public class SortFiniteDataStream {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Sample DataStream (date, value)
+        DataStream<Tuple2<String, String>> input = env.fromElements(
+            Tuple2.of("2024-03-05", "A"),
+            Tuple2.of("2024-02-15", "B"),
+            Tuple2.of("2024-03-01", "C"),
+            Tuple2.of("2024-03-01", "D"), // Duplicate date case
+            Tuple2.of("2024-02-10", "E")
+        );
+
+        // Sort using RichFlatMapFunction
+        DataStream<Tuple2<String, String>> sortedStream = input.flatMap(new SortAndEmitFunction());
+
+        sortedStream.print();
+
+        env.execute("Sort Finite DataStream");
+    }
+
+    // Function to collect, sort, and emit all elements
+    public static class SortAndEmitFunction extends RichFlatMapFunction<Tuple2<String, String>, Tuple2<String, String>> {
+        private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+        private final List<Tuple2<String, String>> buffer = new ArrayList<>();
+
+        @Override
+        public void flatMap(Tuple2<String, String> value, Collector<Tuple2<String, String>> out) {
+            buffer.add(value);
+        }
+
+        @Override
+        public void close() {
+            // Sort by f0 (date field)
+            buffer.sort(Comparator.comparing(e -> LocalDate.parse(e.f0, formatter)));
+            buffer.forEach(out::collect); // Emit sorted elements
+        }
+    }
+}
