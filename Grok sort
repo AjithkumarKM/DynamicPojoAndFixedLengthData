@@ -178,6 +178,78 @@ public static class SortByDateProcessFunction extends KeyedProcessFunction<Strin
                     out.collect(item);
                     LOG.info("Emitted sorted element: {}", item);
                 }
+
+
+adding ------- count
+
+public static class SortByDateProcessFunction extends KeyedProcessFunction<String, Tuple2<String, String>, Tuple2<String, String>> {
+    private static final Logger LOG = LoggerFactory.getLogger(SortByDateProcessFunction.class);
+    private transient ListState<Tuple2<String, String>> buffer;
+    private transient ValueState<Integer> elementCount;
+    private boolean hasEmitted = false;
+    private static final int EXPECTED_ELEMENTS = 200; // Adjust based on your estimate (10 files × 20 lines)
+
+    @Override
+    public void open(Configuration parameters) throws Exception {
+        ListStateDescriptor<Tuple2<String, String>> descriptor =
+            new ListStateDescriptor<>("buffer", Tuple2.class);
+        buffer = getRuntimeContext().getListState(descriptor);
+
+        ValueStateDescriptor<Integer> countDescriptor =
+            new ValueStateDescriptor<>("elementCount", Integer.class, 0);
+        elementCount = getRuntimeContext().getState(countDescriptor);
+
+        LOG.info("Initialized ListState buffer and element counter");
+    }
+
+    @Override
+    public void processElement(Tuple2<String, String> value, Context ctx, Collector<Tuple2<String, String>> out) throws Exception {
+        LOG.info("Adding element to buffer: {}", value);
+        buffer.add(value);
+
+        // Increment the counter
+        int newCount = elementCount.value() + 1;
+        elementCount.update(newCount);
+        LOG.info("Current element count: {}", newCount);
+
+        // Emit once we’ve seen all expected elements
+        if (newCount >= EXPECTED_ELEMENTS && !hasEmitted) {
+            emitSortedData(out);
+        }
+    }
+
+    private void emitSortedData(Collector<Tuple2<String, String>> out) throws Exception {
+        List<Tuple2<String, String>> allData = new ArrayList<>();
+        LOG.info("Starting to retrieve elements from buffer");
+        for (Tuple2<String, String> item : buffer.get()) {
+            if (item != null) {
+                allData.add(item);
+                LOG.info("Retrieved from buffer: {}", item);
+            } else {
+                LOG.warn("Found null element in buffer");
+            }
+        }
+        LOG.info("Total elements retrieved: {}", allData.size());
+
+        if (!allData.isEmpty()) {
+            // Sort by f0 (date) from oldest to newest
+            allData.sort((t1, t2) -> LocalDate.parse(t1.f0).compareTo(LocalDate.parse(t2.f0)));
+            LOG.info("Sorted {} elements", allData.size());
+
+            // Emit sorted data downstream
+            for (Tuple2<String, String> item : allData) {
+                out.collect(item);
+                LOG.info("Emitted sorted element: {}", item);
+            }
+        } else {
+            LOG.warn("No elements to sort in buffer");
+        }
+
+        hasEmitted = true; // Prevent re-emission
+        buffer.clear(); // Clean up state
+        LOG.info("Cleared buffer and marked as emitted");
+    }
+}
             } else {
                 LOG.warn("No elements to sort in buffer");
             }
