@@ -1,36 +1,82 @@
-public static class GlobalSortFunction extends ProcessFunction<Tuple2<String, String>, Tuple2<String, String>> {
-        private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.util.Collector;
+import org.apache.flink.api.java.tuple.Tuple2;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+
+public class FlinkSortUnknownCount {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Example finite DataStream with only dates (yyyy-MM-dd)
+        DataStream<Tuple2<String, String>> input = env.fromElements(
+                Tuple2.of("2025-03-10", "A"),
+                Tuple2.of("2025-03-08", "B"),
+                Tuple2.of("2025-03-09", "C"),
+                Tuple2.of("2025-03-07", "D")
+        );
+
+        // Group all data under the same key and process
+        DataStream<Tuple2<String, String>> sortedStream = input
+                .keyBy(value -> "fixed_key") // Assign all elements the same key
+                .process(new DeduplicatedSortProcessFunction()); // Ensure deduplication & sorting
+
+        sortedStream.print();
+
+        env.execute("Sort Finite Stream with Unknown Count");
+    }
+
+    // Process function to collect, deduplicate, wait, sort, and emit
+    public static class DeduplicatedSortProcessFunction extends KeyedProcessFunction<String, Tuple2<String, String>, Tuple2<String, String>> {
         private transient ListState<Tuple2<String, String>> listState;
+        private boolean timerRegistered = false; // To prevent multiple timers
 
         @Override
         public void open(Configuration parameters) {
             ListStateDescriptor<Tuple2<String, String>> descriptor =
-                new ListStateDescriptor<>("elements", Tuple2.class);
+                    new ListStateDescriptor<>("elements", Types.TUPLE(Types.STRING, Types.STRING));
             listState = getRuntimeContext().getListState(descriptor);
         }
 
         @Override
         public void processElement(Tuple2<String, String> value, Context ctx, Collector<Tuple2<String, String>> out) throws Exception {
+            // Add the element to state
             listState.add(value);
-            ctx.timerService().registerProcessingTimeTimer(System.currentTimeMillis() + 1000); // Trigger sorting after 1s
+
+            // Register a timer to fire 500ms later (only once)
+            if (!timerRegistered) {
+                ctx.timerService().registerProcessingTimeTimer(ctx.timerService().currentProcessingTime() + 500);
+                timerRegistered = true; // Prevent duplicate timers
+            }
         }
 
         @Override
         public void onTimer(long timestamp, OnTimerContext ctx, Collector<Tuple2<String, String>> out) throws Exception {
-            List<Tuple2<String, String>> buffer = new ArrayList<>();
-            for (Tuple2<String, String> element : listState.get()) {
-                buffer.add(element);
+            List<Tuple2<String, String>> elements = new ArrayList<>();
+            for (Tuple2<String, String> elem : listState.get()) {
+                elements.add(elem);
             }
+            listState.clear(); // Clear state after processing
 
-            // Sort the list by date (f0)
-            buffer.sort(Comparator.comparing(e -> LocalDate.parse(e.f0, formatter)));
+            // Sort elements by f0 (date string)
+            elements.sort(Comparator.comparing(o -> o.f0));
 
             // Emit sorted elements
-            for (Tuple2<String, String> element : buffer) {
-                out.collect(element);
+            for (Tuple2<String, String> elem : elements) {
+                out.collect(elem);
             }
 
-            // Clear state after processing
-            listState.clear();
+            // Reset the timer flag
+            timerRegistered = false;
         }
     }
+}
