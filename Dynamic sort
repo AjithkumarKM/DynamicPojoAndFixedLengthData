@@ -1,0 +1,50 @@
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.windowing.AllWindowFunction;
+import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
+import org.apache.flink.streaming.api.windowing.triggers.ProcessingTimeTrigger;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.GlobalWindow;
+import org.apache.flink.util.Collector;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+
+public class ReliableFileSort {
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Assume "combinedStream" is your unified stream from multiple files
+        DataStream<Tuple2<String, String>> combinedStream = ...; // your combined stream from files
+
+        // Wrap everything into a single global window, triggering after 2 seconds inactivity
+        DataStream<Tuple2<String, String>> sortedStream = combinedStream
+                .windowAll(org.apache.flink.streaming.api.windowing.assigners.GlobalWindows.create())
+                .trigger(org.apache.flink.streaming.api.windowing.triggers.PurgingTrigger.of(
+                        org.apache.flink.streaming.api.windowing.triggers.ProcessingTimeTrigger.create()))
+                .apply(new SortAllFunction());
+
+        sortedStream.print();
+
+        env.execute("Reliable File Sorting");
+    }
+
+    // Sort elements when the window is triggered
+    public static class SortAllFunction implements org.apache.flink.streaming.api.functions.windowing.AllWindowFunction<Tuple2<String, String>, Tuple2<String, String>, org.apache.flink.streaming.api.windowing.windows.GlobalWindow> {
+        @Override
+        public void apply(GlobalWindow window, Iterable<Tuple2<String, String>> values, Collector<Tuple2<String, String>> out) {
+            List<Tuple2<String, String>> list = new ArrayList<>();
+            for (Tuple2<String, String> value : values) {
+                list.add(value);
+            }
+
+            list.sort(Comparator.comparing(o -> o.f0));
+
+            for (Tuple2<String, String> item : list) {
+                out.collect(item);
+            }
+        }
+    }
+}
