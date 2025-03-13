@@ -1,29 +1,22 @@
-public static class SortAndEmitFunction extends RichFlatMapFunction<Tuple2<String, String>, Tuple2<String, String>> {
+public static class SortFunction extends RichFlatMapFunction<Tuple2<String, String>, Tuple2<String, String>> {
         private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-        private transient ListState<Tuple2<String, String>> listState;
+        private final List<Tuple2<String, String>> buffer = new ArrayList<>();
 
         @Override
         public void open(Configuration parameters) {
-            ListStateDescriptor<Tuple2<String, String>> descriptor =
-                new ListStateDescriptor<>("sorted-list", Tuple2.class);
-            listState = getRuntimeContext().getListState(descriptor);
+            // No state needed
         }
 
         @Override
-        public void flatMap(Tuple2<String, String> value, Collector<Tuple2<String, String>> out) throws Exception {
-            listState.add(value);
+        public void flatMap(Tuple2<String, String> value, Collector<Tuple2<String, String>> out) {
+            buffer.add(value);
         }
 
         @Override
-        public void close() throws Exception {
-            List<Tuple2<String, String>> sortedList = new ArrayList<>();
-            for (Tuple2<String, String> element : listState.get()) {
-                sortedList.add(element);
-            }
-            sortedList.sort(Comparator.comparing(e -> LocalDate.parse(e.f0, formatter)));
-
-            for (Tuple2<String, String> element : sortedList) {
-                System.out.println(element); // Print sorted data
+        public void close() {
+            buffer.sort(Comparator.comparing(e -> LocalDate.parse(e.f0, formatter)));
+            for (Tuple2<String, String> element : buffer) {
+                System.out.println(element); // Printing sorted output
             }
         }
     }
