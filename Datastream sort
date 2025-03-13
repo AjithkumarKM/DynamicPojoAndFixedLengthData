@@ -1,0 +1,25 @@
+DataStream<Tuple2<String, Integer>> sortedStream = inputStream
+    .keyBy(value -> 1)  // Group all data
+    .process(new KeyedProcessFunction<Integer, Tuple2<String, Integer>, Tuple2<String, Integer>>() {
+        private ListState<Tuple2<String, Integer>> listState;
+
+        @Override
+        public void open(Configuration parameters) {
+            listState = getRuntimeContext().getListState(
+                new ListStateDescriptor<>("sortedList", Types.TUPLE(Types.STRING, Types.INT))
+            );
+        }
+
+        @Override
+        public void processElement(Tuple2<String, Integer> value, Context ctx, Collector<Tuple2<String, Integer>> out) throws Exception {
+            listState.add(value);
+            List<Tuple2<String, Integer>> allValues = new ArrayList<>();
+            for (Tuple2<String, Integer> t : listState.get()) {
+                allValues.add(t);
+            }
+            allValues.sort(Comparator.comparing(Tuple2::f0)); // Sort by f0 (String field)
+            for (Tuple2<String, Integer> sorted : allValues) {
+                out.collect(sorted);
+            }
+        }
+    });
