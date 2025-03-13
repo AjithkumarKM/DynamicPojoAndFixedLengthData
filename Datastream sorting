@@ -1,22 +1,36 @@
-public static class SortFunction extends RichFlatMapFunction<Tuple2<String, String>, Tuple2<String, String>> {
+public static class GlobalSortFunction extends ProcessFunction<Tuple2<String, String>, Tuple2<String, String>> {
         private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
-        private final List<Tuple2<String, String>> buffer = new ArrayList<>();
+        private transient ListState<Tuple2<String, String>> listState;
 
         @Override
         public void open(Configuration parameters) {
-            // No state needed
+            ListStateDescriptor<Tuple2<String, String>> descriptor =
+                new ListStateDescriptor<>("elements", Tuple2.class);
+            listState = getRuntimeContext().getListState(descriptor);
         }
 
         @Override
-        public void flatMap(Tuple2<String, String> value, Collector<Tuple2<String, String>> out) {
-            buffer.add(value);
+        public void processElement(Tuple2<String, String> value, Context ctx, Collector<Tuple2<String, String>> out) throws Exception {
+            listState.add(value);
+            ctx.timerService().registerProcessingTimeTimer(System.currentTimeMillis() + 1000); // Trigger sorting after 1s
         }
 
         @Override
-        public void close() {
-            buffer.sort(Comparator.comparing(e -> LocalDate.parse(e.f0, formatter)));
-            for (Tuple2<String, String> element : buffer) {
-                System.out.println(element); // Printing sorted output
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<Tuple2<String, String>> out) throws Exception {
+            List<Tuple2<String, String>> buffer = new ArrayList<>();
+            for (Tuple2<String, String> element : listState.get()) {
+                buffer.add(element);
             }
+
+            // Sort the list by date (f0)
+            buffer.sort(Comparator.comparing(e -> LocalDate.parse(e.f0, formatter)));
+
+            // Emit sorted elements
+            for (Tuple2<String, String> element : buffer) {
+                out.collect(element);
+            }
+
+            // Clear state after processing
+            listState.clear();
         }
     }
