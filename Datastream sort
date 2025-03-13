@@ -1,48 +1,34 @@
-DataStream<Tuple2<String, String>> sortedStream = inputStream
-            .keyBy(t -> "global")  // Assign all records to a single task
-            .process(new GlobalSortFunction());
-
-        sortedStream.print();
-
-        env.execute("Global Sorting Example");
-    }
-
-    // KeyedProcessFunction to store and sort elements before emitting
-    public static class GlobalSortFunction extends KeyedProcessFunction<String, Tuple2<String, String>, Tuple2<String, String>> {
-        private transient ListState<Tuple2<String, String>> listState;
-        private final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
+public static class SortFunction extends KeyedProcessFunction<String, Tuple2<String, String>, Tuple2<String, String>> {
+        private transient ListState<Tuple2<String, String>> state;
+        private static final DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd");
 
         @Override
-        public void open(org.apache.flink.configuration.Configuration parameters) throws Exception {
+        public void open(Configuration parameters) {
             ListStateDescriptor<Tuple2<String, String>> descriptor =
-                new ListStateDescriptor<>("stored-records", TypeInformation.of(new TypeHint<Tuple2<String, String>>() {}));
-            listState = getRuntimeContext().getListState(descriptor);
+                    new ListStateDescriptor<>("sorted-state", Types.TUPLE(Types.STRING, Types.STRING));
+            state = getRuntimeContext().getListState(descriptor);
         }
 
         @Override
         public void processElement(Tuple2<String, String> value, Context ctx, Collector<Tuple2<String, String>> out) throws Exception {
-            // Store elements in state
-            listState.add(value);
-            // Register a timer to trigger sorting after 100ms
-            ctx.timerService().registerProcessingTimeTimer(ctx.timerService().currentProcessingTime() + 100);
-        }
-
-        @Override
-        public void onTimer(long timestamp, OnTimerContext ctx, Collector<Tuple2<String, String>> out) throws Exception {
-            // Retrieve all stored elements
-            List<Tuple2<String, String>> elements = new ArrayList<>();
-            for (Tuple2<String, String> elem : listState.get()) {
-                elements.add(elem);
+            List<Tuple2<String, String>> currentList = new ArrayList<>();
+            
+            // Load existing state
+            for (Tuple2<String, String> entry : state.get()) {
+                currentList.add(entry);
             }
-            listState.clear();
 
-            // Sort elements based on date (f0)
-            elements.sort((t1, t2) -> LocalDate.parse(t1._1(), formatter).compareTo(LocalDate.parse(t2._1(), formatter)));
+            // Add the new element and sort
+            currentList.add(value);
+            currentList.sort(Comparator.comparing(o -> LocalDate.parse(o.f0, formatter)));
+
+            // Clear and update state with sorted elements
+            state.clear();
+            state.addAll(currentList);
 
             // Emit sorted elements
-            for (Tuple2<String, String> elem : elements) {
-                out.collect(elem);
+            for (Tuple2<String, String> sortedValue : currentList) {
+                out.collect(sortedValue);
             }
         }
     }
-}
