@@ -1,0 +1,114 @@
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.util.Collector;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.List;
+import java.time.LocalDate;
+
+public class SingleJobSortExample {
+    public static void main(String[] args) throws Exception {
+        // Set up the streaming execution environment
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // List to store DataStreams from each file
+        List<DataStream<Tuple2<String, String>>> dataStreams = new ArrayList<>();
+
+        // Dynamically find all files with "xuortpgc" in the directory (replace with your path)
+        String directoryPath = "path/to/directory"; // Update this to your directory
+        List<Path> xuortpgcFiles = new ArrayList<>();
+        Files.list(Paths.get(directoryPath))
+            .filter(path -> path.getFileName().toString().toLowerCase().contains("xuortpgc"))
+            .forEach(xuortpgcFiles::add);
+
+        for (Path path : xuortpgcFiles) {
+            String filename = path.getFileName().toString();
+            System.out.println("Processing file: [" + filename + "]");
+
+            // Read file into DataStream
+            DataStream<String> lines = env.readTextFile(path.toString());
+
+            // Process file into Tuple2 (date, filename)
+            DataStream<Tuple2<String, String>> fileStream = lines
+                .filter(line -> line.startsWith("#")) // Filter lines starting with "#"
+                .map(line -> {
+                    return new Tuple2<>(line.substring(0, 10), filename); // (date, filename)
+                });
+
+            dataStreams.add(fileStream);
+        }
+
+        // Combine all DataStreams into one
+        DataStream<Tuple2<String, String>> combinedStream;
+        if (!dataStreams.isEmpty()) {
+            combinedStream = dataStreams.get(0);
+            for (int i = 1; i < dataStreams.size(); i++) {
+                combinedStream = combinedStream.union(dataStreams.get(i));
+            }
+        } else {
+            throw new RuntimeException("No files found with 'xuortpgc' in the directory.");
+        }
+
+        // Sort the combined stream by f0 (date)
+        DataStream<Tuple2<String, String>> sortedStream = combinedStream
+            .keyBy(value -> "single_key") // Single key to collect all data
+            .process(new SortByDateProcessFunction())
+            .setParallelism(1); // Ensure sorting happens in one task
+
+        // Rest of your application continues here
+        sortedStream.print(); // Replace with your downstream logic
+
+        // Execute the job
+        env.execute("Single Job with Sorted Static Input");
+    }
+
+    public static class SortByDateProcessFunction extends KeyedProcessFunction<String, Tuple2<String, String>, Tuple2<String, String>> {
+        private transient ListState<Tuple2<String, String>> buffer;
+        private boolean hasEmitted = false;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            ListStateDescriptor<Tuple2<String, String>> descriptor =
+                new ListStateDescriptor<>("buffer", Tuple2.class);
+            buffer = getRuntimeContext().getListState(descriptor);
+        }
+
+        @Override
+        public void processElement(Tuple2<String, String> value, Context ctx, Collector<Tuple2<String, String>> out) throws Exception {
+            // Buffer all incoming elements
+            buffer.add(value);
+
+            // Register a timer to emit results after a short delay (to ensure all data is read)
+            ctx.timerService().registerProcessingTimeTimer(ctx.timerService().currentProcessingTime() + 1000);
+        }
+
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<Tuple2<String, String>> out) throws Exception {
+            if (!hasEmitted) {
+                List<Tuple2<String, String>> allData = new ArrayList<>();
+                for (Tuple2<String, String> item : buffer.get()) {
+                    allData.add(item);
+                }
+
+                // Sort by f0 (date) from oldest to newest
+                allData.sort((t1, t2) -> LocalDate.parse(t1.f0).compareTo(LocalDate.parse(t2.f0)));
+
+                // Emit sorted data downstream
+                for (Tuple2<String, String> item : allData) {
+                    out.collect(item);
+                }
+
+                hasEmitted = true; // Prevent re-emission
+                buffer.clear(); // Clean up state
+            }
+        }
+    }
+}
