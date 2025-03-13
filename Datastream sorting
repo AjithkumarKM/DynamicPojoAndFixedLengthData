@@ -1,82 +1,61 @@
-import org.apache.flink.api.common.state.ListState;
-import org.apache.flink.api.common.state.ListStateDescriptor;
-import org.apache.flink.api.common.typeinfo.Types;
-import org.apache.flink.configuration.Configuration;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor;
+import org.apache.flink.streaming.api.windowing.assigners.GlobalWindows;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
+import org.apache.flink.streaming.api.functions.windowing.AllWindowFunction;
 import org.apache.flink.util.Collector;
-import org.apache.flink.api.java.tuple.Tuple2;
 
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
-public class FlinkSortUnknownCount {
+public class ReliableSortStream {
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-        // Example finite DataStream with only dates (yyyy-MM-dd)
-        DataStream<Tuple2<String, String>> input = env.fromElements(
-                Tuple2.of("2025-03-10", "A"),
-                Tuple2.of("2025-03-08", "B"),
-                Tuple2.of("2025-03-09", "C"),
-                Tuple2.of("2025-03-07", "D")
-        );
+        // Add this line explicitly to indicate bounded stream (important)
+        env.getConfig().setAutoWatermarkInterval(100);
 
-        // Group all data under the same key and process
+        // Finite DataStream with dates as yyyy-MM-dd
+        DataStream<Tuple2<String, String>> input = env.fromElements(
+            Tuple2.of("2025-03-10", "A"),
+            Tuple2.of("2025-03-08", "B"),
+            Tuple2.of("2025-03-09", "C"),
+            Tuple2.of("2025-03-07", "D")
+        )
+        // Assign timestamps for EventTime (required for event-time processing)
+        .assignTimestampsAndWatermarks(new AscendingTimestampExtractor<Tuple2<String, String>>() {
+            final SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+            @Override
+            public long extractAscendingTimestamp(Tuple2<String, String> element) {
+                try {
+                    return sdf.parse(element.f0).getTime();
+                } catch (Exception e) {
+                    throw new RuntimeException("Invalid date format: " + element.f0);
+                }
+            }
+        });
+
+        // Use an Event-Time window that covers all your events
         DataStream<Tuple2<String, String>> sortedStream = input
-                .keyBy(value -> "fixed_key") // Assign all elements the same key
-                .process(new DeduplicatedSortProcessFunction()); // Ensure deduplication & sorting
+            .windowAll(TumblingEventTimeWindows.of(Time.days(1))) // 1-day window covers all elements in your example
+            .apply(new AllWindowFunction<Tuple2<String, String>, Tuple2<String, String>, TimeWindow>() {
+                @Override
+                public void apply(TimeWindow window, Iterable<Tuple2<String, String>> values, Collector<Tuple2<String, String>> out) {
+                    List<Tuple2<String, String>> list = new ArrayList<>();
+                    values.forEach(list::add);
+                    list.sort(Comparator.comparing(o -> o.f0));
+                    list.forEach(out::collect);
+                }
+            });
 
         sortedStream.print();
 
-        env.execute("Sort Finite Stream with Unknown Count");
-    }
-
-    // Process function to collect, deduplicate, wait, sort, and emit
-    public static class DeduplicatedSortProcessFunction extends KeyedProcessFunction<String, Tuple2<String, String>, Tuple2<String, String>> {
-        private transient ListState<Tuple2<String, String>> listState;
-        private boolean timerRegistered = false; // To prevent multiple timers
-
-        @Override
-        public void open(Configuration parameters) {
-            ListStateDescriptor<Tuple2<String, String>> descriptor =
-                    new ListStateDescriptor<>("elements", Types.TUPLE(Types.STRING, Types.STRING));
-            listState = getRuntimeContext().getListState(descriptor);
-        }
-
-        @Override
-        public void processElement(Tuple2<String, String> value, Context ctx, Collector<Tuple2<String, String>> out) throws Exception {
-            // Add the element to state
-            listState.add(value);
-
-            // Register a timer to fire 500ms later (only once)
-            if (!timerRegistered) {
-                ctx.timerService().registerProcessingTimeTimer(ctx.timerService().currentProcessingTime() + 500);
-                timerRegistered = true; // Prevent duplicate timers
-            }
-        }
-
-        @Override
-        public void onTimer(long timestamp, OnTimerContext ctx, Collector<Tuple2<String, String>> out) throws Exception {
-            List<Tuple2<String, String>> elements = new ArrayList<>();
-            for (Tuple2<String, String> elem : listState.get()) {
-                elements.add(elem);
-            }
-            listState.clear(); // Clear state after processing
-
-            // Sort elements by f0 (date string)
-            elements.sort(Comparator.comparing(o -> o.f0));
-
-            // Emit sorted elements
-            for (Tuple2<String, String> elem : elements) {
-                out.collect(elem);
-            }
-
-            // Reset the timer flag
-            timerRegistered = false;
-        }
+        env.execute("Reliable Sorting with Unknown Count");
     }
 }
