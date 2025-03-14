@@ -1,0 +1,174 @@
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.ListState;
+import org.apache.flink.api.common.state.ListStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.file.src.FileSource;
+import org.apache.flink.connector.file.src.enumerate.NonSplittingRecursiveEnumerator;
+import org.apache.flink.connector.file.src.reader.TextLineInputFormat;
+import org.apache.flink.core.fs.Path;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
+import org.apache.flink.util.Collector;
+
+import java.nio.file.Path as JavaPath;
+import java.nio.file.Paths;
+import java.nio.file.Files;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public class SingleJobSortExample {
+    private static final Logger LOG = LoggerFactory.getLogger(SingleJobSortExample.class);
+
+    public static void main(String[] args) throws Exception {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // List to store DataStreams from each file
+        List<DataStream<Tuple2<String, String>>> dataStreams = new ArrayList<>();
+
+        // Read files using a continuous FileSource
+        String directoryPath = "path/to/directory"; // Update this to your directory
+        List<JavaPath> xuortpgcFiles = new ArrayList<>();
+        Files.list(Paths.get(directoryPath))
+            .filter(path -> {
+                boolean matches = path.getFileName().toString().toLowerCase().contains("xuortpgc");
+                LOG.info("Checking file: {}, matches: {}", path, matches);
+                return matches;
+            })
+            .forEach(xuortpgcFiles::add);
+
+        for (JavaPath javaPath : xuortpgcFiles) {
+            String filename = javaPath.getFileName().toString();
+            LOG.info("Attempting to process file: [{}]", filename);
+
+            org.apache.flink.core.fs.Path flinkPath = new org.apache.flink.core.fs.Path(javaPath.toString());
+            FileSource<String> fileSource = FileSource
+                .forRecordStreamFormat(new TextLineInputFormat(), flinkPath)
+                .monitorContinuously(Duration.ofSeconds(1)) // Check for new data every second
+                .fileEnumerator(new NonSplittingRecursiveEnumerator()) // Avoid splitting files
+                .build();
+
+            DataStream<String> lines = env.fromSource(fileSource, WatermarkStrategy.noWatermarks(), "FileSource-" + filename)
+                .name("FileSource-" + filename);
+
+            DataStream<Tuple2<String, String>> fileStream = lines
+                .filter(line -> {
+                    LOG.info("Filtering line: [{}]", line);
+                    return line != null && line.startsWith("#");
+                })
+                .map(line -> {
+                    LOG.info("Mapping line: [{}]", line);
+                    return new Tuple2<>(line.substring(0, 10), filename);
+                });
+
+            dataStreams.add(fileStream);
+        }
+
+        // Combine all DataStreams into one
+        DataStream<Tuple2<String, String>> combinedStream;
+        if (!dataStreams.isEmpty()) {
+            combinedStream = dataStreams.get(0);
+            for (int i = 1; i < dataStreams.size(); i++) {
+                combinedStream = combinedStream.union(dataStreams.get(i));
+                LOG.info("Union with stream {}", i);
+            }
+        } else {
+            throw new RuntimeException("No files found with 'xuortpgc' in the directory.");
+        }
+
+        // Assign synthetic timestamps and watermarks based on arrival time
+        DataStream<Tuple2<String, String>> streamWithTimestamps = combinedStream
+            .assignTimestampsAndWatermarks(WatermarkStrategy
+                .<Tuple2<String, String>>forMonotonousTimestamps()
+                .withTimestampAssigner((event, timestamp) -> {
+                    long ts = System.currentTimeMillis();
+                    LOG.info("Assigned synthetic timestamp {} to event {}", ts, event);
+                    return ts;
+                }));
+
+        // Process the stream to sort and emit
+        DataStream<Tuple2<String, String>> sortedStream = streamWithTimestamps
+            .keyBy(value -> "single_key") // Single key to collect all data
+            .process(new SortByDateProcessFunction())
+            .setParallelism(1); // Ensure sorting happens in one task
+
+        // Add a sink to keep the job alive
+        sortedStream.print();
+
+        env.execute("Single Job with Sorted Static Input");
+    }
+
+    public static class SortByDateProcessFunction extends KeyedProcessFunction<String, Tuple2<String, String>, Tuple2<String, String>> {
+        private static final Logger LOG = LoggerFactory.getLogger(SortByDateProcessFunction.class);
+        private transient ListState<Tuple2<String, String>> buffer;
+        private boolean hasEmitted = false;
+        private long lastElementTime = Long.MIN_VALUE;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            ListStateDescriptor<Tuple2<String, String>> descriptor =
+                new ListStateDescriptor<>("buffer", Types.TUPLE(Types.STRING, Types.STRING));
+            buffer = getRuntimeContext().getListState(descriptor);
+            LOG.info("Initialized ListState buffer");
+        }
+
+        @Override
+        public void processElement(Tuple2<String, String> value, Context ctx, Collector<Tuple2<String, String>> out) throws Exception {
+            LOG.info("Adding element to buffer: {}", value);
+            buffer.add(value);
+
+            // Update the last element time
+            lastElementTime = ctx.timestamp();
+            LOG.info("Updated last element time to: {}", lastElementTime);
+
+            // Register an event-time timer to fire after a delay
+            long timerTime = lastElementTime + 5000; // 5 seconds after the last element
+            ctx.timerService().registerEventTimeTimer(timerTime);
+            LOG.info("Registered event-time timer for timestamp: {}", timerTime);
+        }
+
+        @Override
+        public void onTimer(long timestamp, OnTimerContext ctx, Collector<Tuple2<String, String>> out) throws Exception {
+            // Check if this timer corresponds to the last element + 5 seconds
+            if (timestamp == lastElementTime + 5000 && !hasEmitted) {
+                LOG.info("Event-time timer triggered at timestamp: {}", timestamp);
+                List<Tuple2<String, String>> allData = new ArrayList<>();
+                for (Tuple2<String, String> item : buffer.get()) {
+                    if (item != null) {
+                        allData.add(item);
+                        LOG.info("Retrieved from buffer: {}", item);
+                    } else {
+                        LOG.warn("Found null element in buffer");
+                    }
+                }
+                LOG.info("Total elements retrieved: {}", allData.size());
+
+                if (!allData.isEmpty()) {
+                    // Sort by f0 (date) from oldest to newest
+                    allData.sort((t1, t2) -> LocalDate.parse(t1.f0).compareTo(LocalDate.parse(t2.f0)));
+                    LOG.info("Sorted {} elements", allData.size());
+
+                    // Emit sorted data downstream
+                    for (Tuple2<String, String> item : allData) {
+                        out.collect(item);
+                        LOG.info("Emitted sorted element: {}", item);
+                    }
+                } else {
+                    LOG.warn("No elements to sort in buffer");
+                }
+
+                hasEmitted = true; // Prevent re-emission
+                buffer.clear(); // Clean up state
+                LOG.info("Cleared buffer");
+            } else {
+                LOG.info("Timer at {} skipped (already emitted or not the final timer)", timestamp);
+            }
+        }
+    }
+}
