@@ -1,0 +1,86 @@
+// Main method to compare two JSON nodes and return a map of changes
+Map<String, JsonNode> getChanges(JsonNode oldNode, JsonNode newNode) {
+    // Initialize an empty map to store changes
+    Map<String, JsonNode> changes = new HashMap<>();
+    // Start traversal with an empty path
+    traverse(newNode, [], changes, oldNode);
+    return changes;
+}
+
+// Recursive function to traverse the new node and detect changes
+void traverse(JsonNode node, List<Object> pathList, Map<String, JsonNode> changes, JsonNode oldNode) {
+    if (node.isObject()) {
+        // For objects, iterate over each key
+        for (String key in node.fieldNames()) {
+            // Append the key to the current path
+            List<Object> newPath = copyOf(pathList);
+            newPath.add(key);
+            // Recurse into the value at this key
+            traverse(node.get(key), newPath, changes, oldNode);
+        }
+    } else if (node.isArray()) {
+        // For arrays, iterate over each element
+        for (int i = 0; i < node.size(); i++) {
+            // Append the index to the current path
+            List<Object> newPath = copyOf(pathList);
+            newPath.add(i);
+            // Recurse into the element at this index
+            traverse(node.get(i), newPath, changes, oldNode);
+        }
+    } else {
+        // For primitive nodes (string, number, boolean, null)
+        JsonNode oldValue = getValueAtPath(oldNode, pathList);
+        // If the path doesn't exist in oldNode or the values differ, record the new value
+        if (oldValue == null || !oldValue.equals(node)) {
+            String pathStr = toPathString(pathList);
+            changes.put(pathStr, node);
+        }
+    }
+}
+
+// Helper function to get the value at a specific path in a JSON node
+JsonNode getValueAtPath(JsonNode node, List<Object> pathList) {
+    JsonNode current = node;
+    for (Object component in pathList) {
+        if (component is String && current.isObject()) {
+            // Navigate object by key
+            current = current.get(component);
+        } else if (component is Integer && current.isArray()) {
+            // Navigate array by index
+            int index = component;
+            if (index >= 0 && index < current.size()) {
+                current = current.get(index);
+            } else {
+                return null; // Index out of bounds
+            }
+        } else {
+            return null; // Type mismatch or path not found
+        }
+        if (current == null) {
+            return null; // Path not found
+        }
+    }
+    return current;
+}
+
+// Helper function to convert path list to dot notation string
+String toPathString(List<Object> pathList) {
+    if (pathList.isEmpty()) {
+        return "";
+    }
+    StringBuilder result = new StringBuilder();
+    for (int i = 0; i < pathList.size(); i++) {
+        Object component = pathList[i];
+        if (component is String) {
+            // Append object key with dot prefix if not the first component
+            if (i > 0) {
+                result.append(".");
+            }
+            result.append(component);
+        } else if (component is Integer) {
+            // Append array index in square brackets
+            result.append("[").append(component).append("]");
+        }
+    }
+    return result.toString();
+}
