@@ -1,0 +1,124 @@
+import com.fasterxml.jackson.databind.JsonNode;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+public class JsonDiff {
+
+    /**
+     * Compares two JsonNode objects and returns a map of changed or new values.
+     * Keys are in dot notation (e.g., "name.firstname" or "address.tempAddr[1].street").
+     * Values are the new values from newNode.
+     */
+    public Map<String, JsonNode> getChanges(JsonNode oldNode, JsonNode newNode) {
+        Map<String, JsonNode> changes = new HashMap<>();
+        traverse(newNode, new ArrayList<>(), changes, oldNode);
+        return changes;
+    }
+
+    /**
+     * Recursively traverses the newNode, comparing it with oldNode to detect changes.
+     * @param node The current node from newNode being processed.
+     * @param pathList The current path as a list of keys/indices.
+     * @param changes Map to store detected changes.
+     * @param oldNode The oldNode to compare against.
+     */
+    private void traverse(JsonNode node, List<Object> pathList, Map<String, JsonNode> changes, JsonNode oldNode) {
+        if (node.isObject()) {
+            // Iterate over object fields
+            Iterator<String> fieldNames = node.fieldNames();
+            while (fieldNames.hasNext()) {
+                String key = fieldNames.next();
+                List<Object> newPath = new ArrayList<>(pathList);
+                newPath.add(key);
+                traverse(node.get(key), newPath, changes, oldNode);
+            }
+        } else if (node.isArray()) {
+            // Iterate over array elements
+            for (int i = 0; i < node.size(); i++) {
+                List<Object> newPath = new ArrayList<>(pathList);
+                newPath.add(i);
+                traverse(node.get(i), newPath, changes, oldNode);
+            }
+        } else {
+            // Handle primitive values (string, number, boolean, null)
+            JsonNode oldValue = getValueAtPath(oldNode, pathList);
+            if (oldValue == null || !oldValue.equals(node)) {
+                String pathStr = toPathString(pathList);
+                changes.put(pathStr, node);
+            }
+        }
+    }
+
+    /**
+     * Retrieves the value at the specified path in the given JsonNode.
+     * @param node The JsonNode to navigate.
+     * @param pathList The path as a list of keys (String) or indices (Integer).
+     * @return The JsonNode at the path, or null if the path is invalid.
+     */
+    private JsonNode getValueAtPath(JsonNode node, List<Object> pathList) {
+        JsonNode current = node;
+        for (Object component : pathList) {
+            if (component instanceof String && current != null && current.isObject()) {
+                current = current.get((String) component);
+            } else if (component instanceof Integer && current != null && current.isArray()) {
+                int index = (Integer) component;
+                if (index >= 0 && index < current.size()) {
+                    current = current.get(index);
+                } else {
+                    return null; // Index out of bounds
+                }
+            } else {
+                return null; // Type mismatch or path not found
+            }
+        }
+        return current;
+    }
+
+    /**
+     * Converts a path list to a dot-notation string.
+     * @param pathList List of path components (String for keys, Integer for indices).
+     * @return The path as a string (e.g., "name.firstname" or "marks.subject[2]").
+     */
+    private String toPathString(List<Object> pathList) {
+        if (pathList.isEmpty()) {
+            return "";
+        }
+        StringBuilder result = new StringBuilder();
+        for (int i = 0; i < pathList.size(); i++) {
+            Object component = pathList.get(i);
+            if (component instanceof String) {
+                if (i > 0) {
+                    result.append(".");
+                }
+                result.append(component);
+            } else if (component instanceof Integer) {
+                result.append("[").append(component).append("]");
+            }
+        }
+        return result.toString();
+    }
+
+    // Example usage (optional)
+    public static void main(String[] args) throws Exception {
+        // Example JSON strings
+        String oldJson = "{\"name\": {\"firstname\": \"john\"}, \"address\": {\"tempAddr\": [{\"street\": \"new\"}, {\"street\": \"main\"}]}}";
+        String newJson = "{\"name\": {\"firstname\": \"ajith\"}, \"address\": {\"tempAddr\": [{\"street\": \"new\"}, {\"street\": \"old\"}]}, \"marks\": {\"subject\": [50, 60, 78]}}";
+
+        // Parse JSON using Jackson
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        JsonNode oldNode = mapper.readTree(oldJson);
+        JsonNode newNode = mapper.readTree(newJson);
+
+        // Get changes
+        JsonDiff diff = new JsonDiff();
+        Map<String, JsonNode> changes = diff.getChanges(oldNode, newNode);
+
+        // Print results
+        for (Map.Entry<String, JsonNode> entry : changes.entrySet()) {
+            System.out.println(entry.getKey() + " = " + entry.getValue());
+        }
+    }
+}
