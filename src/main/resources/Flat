@@ -1,0 +1,287 @@
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
+import org.apache.flink.api.common.typeutils.base.TypeSerializerSingleton;
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.Map;
+
+class MapSerializer extends TypeSerializerSingleton<Map<String, Object>> {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Override
+    public boolean isImmutableType() {
+        return false;
+    }
+
+    @Override
+    public Map<String, Object> createInstance() {
+        return new HashMap<>();
+    }
+
+    @Override
+    public Map<String, Object> copy(Map<String, Object> from) {
+        return new HashMap<>(from);
+    }
+
+    @Override
+    public Map<String, Object> copy(Map<String, Object> from, Map<String, Object> reuse) {
+        reuse.clear();
+        reuse.putAll(from);
+        return reuse;
+    }
+
+    @Override
+    public int getLength() {
+        return -1; // Variable length
+    }
+
+    @Override
+    public void serialize(Map<String, Object> value, DataOutputView target) throws IOException {
+        if (value == null) {
+            throw new IllegalArgumentException("Cannot serialize null Map");
+        }
+        try {
+            byte[] bytes = MAPPER.writeValueAsBytes(value);
+            target.writeInt(bytes.length);
+            target.write(bytes);
+        } catch (JsonProcessingException e) {
+            throw new IOException("Failed to serialize Map to JSON bytes: " + value, e);
+        }
+    }
+
+    @Override
+    public Map<String, Object> deserialize(DataInputView source) throws IOException {
+        int length = source.readInt();
+        byte[] bytes = new byte[length];
+        source.readFully(bytes);
+        try {
+            return MAPPER.readValue(bytes, Map.class);
+        } catch (Exception e) {
+            throw new IOException("Failed to deserialize bytes to Map", e);
+        }
+    }
+
+    @Override
+    public Map<String, Object> deserialize(Map<String, Object> reuse, DataInputView source) throws IOException {
+        reuse.clear();
+        Map<String, Object> result = deserialize(source);
+        reuse.putAll(result);
+        return reuse;
+    }
+
+    @Override
+    public void copy(DataInputView source, DataOutputView target) throws IOException {
+        int length = source.readInt();
+        target.writeInt(length);
+        byte[] bytes = new byte[length];
+        source.readFully(bytes);
+        target.write(bytes);
+    }
+
+    @Override
+    public TypeSerializerSnapshot<Map<String, Object>> snapshotConfiguration() {
+        return new MapSerializerSnapshot();
+    }
+}
+
+class MapSerializerSnapshot implements TypeSerializerSnapshot<Map<String, Object>> {
+    @Override
+    public int getCurrentVersion() {
+        return 1;
+    }
+
+    @Override
+    public void writeSnapshot(DataOutputView out) throws IOException {
+        // No state to write
+    }
+
+    @Override
+    public void readSnapshot(int readVersion, DataInputView in, ClassLoader userCodeClassLoader) throws IOException {
+        // No state to read
+    }
+
+    @Override
+    public TypeSerializer<Map<String, Object>> restoreSerializer() {
+        return new MapSerializer();
+    }
+}
+------------
+
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.types.DataType;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+public class DeltaTableSchema {
+    private static final Logger LOG = LoggerFactory.getLogger(DeltaTableSchema.class);
+
+    public static Schema buildSchema() {
+        LOG.debug("Building table schema for delta table");
+
+        // Create the custom TypeSerializer
+        TypeSerializer<Map<String, Object>> mapSerializer = new MapSerializer();
+
+        // Define the RAW type for Map<String, Object>
+        DataType rawMapType = DataTypes.RAW(Map.class, mapSerializer);
+
+        return Schema.newBuilder()
+            .column("key", DataTypes.STRING())
+            .column("checksum", DataTypes.STRING())
+            .column("value", rawMapType)
+            .column("businessDate", DataTypes.STRING())
+            .column("processedDate", DataTypes.STRING())
+            .column("version", DataTypes.INT())
+            .build();
+    }
+}
+
+
+---------
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+
+class AutoTypeInformation<T> extends TypeInformation<T> {
+    private final Class<T> clazz;
+    private final TypeSerializer<T> serializer;
+
+    public AutoTypeInformation(Class<T> clazz, TypeSerializer<T> serializer) {
+        this.clazz = clazz;
+        this.serializer = serializer;
+    }
+
+    @Override
+    public boolean isBasicType() {
+        return false;
+    }
+
+    @Override
+    public boolean isTupleType() {
+        return false;
+    }
+
+    @Override
+    public int getArity() {
+        return 1;
+    }
+
+    @Override
+    public int getTotalFields() {
+        return 1;
+    }
+
+    @Override
+    public Class<T> getTypeClass() {
+        return clazz;
+    }
+
+    @Override
+    public boolean isKeyType() {
+        return false;
+    }
+
+    @Override
+    public TypeSerializer<T> createSerializer(ExecutionConfig config) {
+        return serializer;
+    }
+
+    @Override
+    public String toString() {
+        return "AutoTypeInformation<" + clazz.getName() + ">";
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+        if (obj instanceof AutoTypeInformation) {
+            AutoTypeInformation<?> other = (AutoTypeInformation<?>) obj;
+            return clazz.equals(other.clazz) && serializer.equals(other.serializer);
+        }
+        return false;
+    }
+
+    @Override
+    public int hashCode() {
+        return clazz.hashCode() + serializer.hashCode();
+    }
+}
+
+
+--------
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.types.Row;
+import org.bson.Document;
+import java.util.Map;
+
+// Assuming filteredChecksumStream is a DataStream<Tuple2<?, DeltaRecord>>
+DataStream<Row> deltaRecordsUpsertStream = filteredChecksumStream
+    .map(t -> {
+        DeltaRecord record = t.f1;
+        return Row.of(record.key(), record.checksum(), record.value(), record.businessDate(), record.processedDate(), record.version());
+    })
+    .returns(Types.ROW_NAMED(
+        new String[]{"KEYCONSTANT", "CHECKSUMCONSTANT", "VALUECONSTANT", "BUSINESSDATECONSTANT", "PROCESSEDDATECONSTANT", "VERSIONCONSTANT"},
+        Types.STRING, Types.STRING, new AutoTypeInformation<>(Map.class, new MapSerializer()), Types.STRING, Types.STRING, Types.INT));
+
+// Convert to Document for MongoDB sink (example)
+DataStream<Document> documentStream = deltaRecordsUpsertStream.map(row -> {
+    String key = (String) row.getField(0);
+    String checksum = (String) row.getField(1);
+    Map<String, Object> value = (Map<String, Object>) row.getField(2);
+    String businessDate = (String) row.getField(3);
+    String processedDate = (String) row.getField(4);
+    Integer version = (Integer) row.getField(5);
+
+    return new Document()
+        .append("key", key)
+        .append("checksum", checksum)
+        .append("value", value)
+        .append("businessDate", businessDate)
+        .append("processedDate", processedDate)
+        .append("version", version);
+});
+
+
+----------
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import java.io.Serializable;
+import java.util.Map;
+
+public record DeltaRecord(
+    String key,
+    String checksum,
+    Map<String, Object> value,
+    String businessDate,
+    String processedDate,
+    Integer version
+) implements Serializable {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    public static DeltaRecord fromStringValue(
+        String key,
+        String checksum,
+        String value,
+        String businessDate,
+        String processedDate,
+        Integer version
+    ) {
+        if (value == null) {
+            throw new IllegalArgumentException("Value cannot be null");
+        }
+        try {
+            Map<String, Object> valueMap = MAPPER.readValue(value, Map.class);
+            return new DeltaRecord(key, checksum, valueMap, businessDate, processedDate, version);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to parse value as JSON: " + value, e);
+        }
+    }
+}
+
+-------
