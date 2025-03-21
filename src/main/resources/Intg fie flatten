@@ -1,0 +1,126 @@
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import java.io.Serializable;
+import java.util.Map;
+
+public record DeltaRecord(
+    String key,
+    String checksum,
+    Map<String, Object> value,
+    String businessDate,
+    String processedDate,
+    Integer version
+) implements Serializable {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    public static DeltaRecord fromStringValue(
+        String key,
+        String checksum,
+        String value,
+        String businessDate,
+        String processedDate,
+        Integer version
+    ) {
+        if (value == null) {
+            throw new IllegalArgumentException("Value cannot be null");
+        }
+        try {
+            Map<String, Object> valueMap = MAPPER.readValue(value, Map.class);
+            return new DeltaRecord(key, checksum, valueMap, businessDate, processedDate, version);
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("Failed to parse value as JSON: " + value, e);
+        }
+    }
+}
+
+------------
+import org.apache.flink.table.api.DataTypes;
+import org.apache.flink.table.api.Schema;
+import org.apache.flink.table.types.logical.RawType;
+import org.apache.flink.table.types.DataType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import java.util.Map;
+
+public static Schema buildSchema() {
+    LOG.debug("Building table schema for delta table");
+
+    // Define a RAW type for the Map<String, Object>
+    DataType rawMapType = DataTypes.RAW(
+        Map.class,
+        new RawType.Serializer<Map<String, Object>>() {
+            private static final ObjectMapper MAPPER = new ObjectMapper();
+
+            @Override
+            public byte[] serialize(Map<String, Object> value) {
+                if (value == null) {
+                    throw new IllegalArgumentException("Cannot serialize null Map");
+                }
+                try {
+                    return MAPPER.writeValueAsBytes(value);
+                } catch (JsonProcessingException e) {
+                    throw new RuntimeException("Failed to serialize Map to JSON bytes: " + value, e);
+                }
+            }
+
+            @Override
+            public Map<String, Object> deserialize(byte[] bytes) {
+                if (bytes == null) {
+                    throw new IllegalArgumentException("Cannot deserialize null bytes");
+                }
+                try {
+                    return MAPPER.readValue(bytes, Map.class);
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to deserialize bytes to Map", e);
+                }
+            }
+        }
+    );
+
+    return Schema.newBuilder()
+        .column("key", DataTypes.STRING())
+        .column("checksum", DataTypes.STRING())
+        .column("value", rawMapType)
+        .column("businessDate", DataTypes.STRING())
+        .column("processedDate", DataTypes.STRING())
+        .column("version", DataTypes.INT())
+        .build();
+}
+
+
+------------
+import org.apache.flink.types.Row;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.bson.Document;
+
+DataStream<Row> deltaRecordsUpsertStream = filteredChecksumStream
+    .map(t -> {
+        DeltaRecord record = t.f1; // Already a DeltaRecord with value as Map<String, Object>
+        return Row.of(record.key(), record.checksum(), record.value(), record.businessDate(), record.processedDate(), record.version());
+    })
+    .returns(Types.ROW_NAMED(
+        new String[]{"KEYCONSTANT", "CHECKSUMCONSTANT", "VALUECONSTANT", "BUSINESSDATECONSTANT", "PROCESSEDDATECONSTANT", "VERSIONCONSTANT"},
+        Types.STRING, Types.STRING, Types.OBJECT, Types.STRING, Types.STRING, Types.INT));
+
+// Convert Row to Document for MongoDB sink
+DataStream<Document> documentStream = deltaRecordsUpsertStream.map(row -> {
+    String key = (String) row.getField(0);
+    String checksum = (String) row.getField(1);
+    Map<String, Object> value = (Map<String, Object>) row.getField(2);
+    String businessDate = (String) row.getField(3);
+    String processedDate = (String) row.getField(4);
+    Integer version = (Integer) row.getField(5);
+
+    return new Document()
+        .append("key", key)
+        .append("checksum", checksum)
+        .append("value", value)
+        .append("businessDate", businessDate)
+        .append("processedDate", processedDate)
+        .append("version", version);
+});
+
+// Use the MongoDB sink to insert the Document
+// (Assuming a MongoDB sink is configured, e.g., MongoSink)
+// statementSet.add(fileUpsertTable.insertInto(s: collectionName + SINK_VAR));
