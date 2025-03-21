@@ -285,3 +285,44 @@ public record DeltaRecord(
 }
 
 -------
+import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
+import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
+import org.apache.flink.core.memory.DataInputView;
+import org.apache.flink.core.memory.DataOutputView;
+import java.io.IOException;
+import java.util.Map;
+
+public class MapSerializerSnapshot implements TypeSerializerSnapshot<Map<String, Object>> {
+
+    @Override
+    public int getCurrentVersion() {
+        return 1; // Version of the snapshot format
+    }
+
+    @Override
+    public void writeSnapshot(DataOutputView out) throws IOException {
+        // No configuration state to write for this simple serializer
+    }
+
+    @Override
+    public void readSnapshot(int readVersion, DataInputView in, ClassLoader userCodeClassLoader) throws IOException {
+        // No configuration state to read for this simple serializer
+    }
+
+    @Override
+    public TypeSerializer<Map<String, Object>> restoreSerializer() {
+        return new MapSerializer(); // Returns a new instance of the serializer
+    }
+
+    @Override
+    public TypeSerializerSchemaCompatibility<Map<String, Object>> resolveSchemaCompatibility(
+            TypeSerializer<Map<String, Object>> newSerializer) {
+        // Check if the new serializer is the same class as the original
+        if (newSerializer.getClass().equals(MapSerializer.class)) {
+            return TypeSerializerSchemaCompatibility.compatibleAsIs();
+        } else {
+            return TypeSerializerSchemaCompatibility.incompatible();
+        }
+    }
+}
