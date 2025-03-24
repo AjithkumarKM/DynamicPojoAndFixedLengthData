@@ -1,0 +1,171 @@
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+public class JsonDiffTest {
+
+    private JsonDiff jsonDiff;
+    private ObjectMapper mapper;
+
+    @BeforeEach
+    void setUp() {
+        jsonDiff = new JsonDiff();
+        mapper = new ObjectMapper();
+    }
+
+    @Test
+    void testPrimitiveStringChange() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"name\": \"Leonardo\"}");
+        JsonNode newNode = mapper.readTree("{\"name\": \"Cleopatra\"}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("\"Cleopatra\"", changes.get("name").toString());
+    }
+
+    @Test
+    void testNewFieldAdded() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"name\": \"Galileo\"}");
+        JsonNode newNode = mapper.readTree("{\"name\": \"Galileo\", \"era\": \"Renaissance\"}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("\"Renaissance\"", changes.get("era").toString());
+    }
+
+    @Test
+    void testNestedObjectChange() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"scientist\": {\"name\": \"Newton\"}}");
+        JsonNode newNode = mapper.readTree("{\"scientist\": {\"name\": \"Einstein\"}}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("\"Einstein\"", changes.get("scientist.name").toString());
+    }
+
+    @Test
+    void testArrayElementChange() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"inventions\": [1492, 1665, 1905]}");
+        JsonNode newNode = mapper.readTree("{\"inventions\": [1492, 1670, 1905]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("1670", changes.get("inventions[1]").toString());
+    }
+
+    @Test
+    void testArrayGrowth() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"battles\": [480, 331]}");
+        JsonNode newNode = mapper.readTree("{\"battles\": [480, 331, 323]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("323", changes.get("battles[2]").toString());
+    }
+
+    @Test
+    void testArrayOfObjects() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"rulers\": [{\"name\": \"Caesar\"}, {\"name\": \"Augustus\"}]}");
+        JsonNode newNode = mapper.readTree("{\"rulers\": [{\"name\": \"Nero\"}, {\"name\": \"Augustus\"}]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("\"Nero\"", changes.get("rulers[0].name").toString());
+    }
+
+    @Test
+    void testNestedArray() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"wars\": [[1914, 1918], [1939, 1945]]}");
+        JsonNode newNode = mapper.readTree("{\"wars\": [[1914, 1918], [1939, 1941]]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("1941", changes.get("wars[1][1]").toString());
+    }
+
+    @Test
+    void testEmptyNodes() throws Exception {
+        JsonNode oldNode = mapper.readTree("{}");
+        JsonNode newNode = mapper.readTree("{}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertTrue(changes.isEmpty()); // Covers empty pathList in toPathString
+    }
+
+    @Test
+    void testOldNodeEmpty() throws Exception {
+        JsonNode oldNode = mapper.readTree("{}");
+        JsonNode newNode = mapper.readTree("{\"philosopher\": \"Socrates\", \"works\": [399, 387]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(3, changes.size());
+        assertEquals("\"Socrates\"", changes.get("philosopher").toString());
+        assertEquals("399", changes.get("works[0]").toString());
+        assertEquals("387", changes.get("works[1]").toString());
+    }
+
+    @Test
+    void testNullValueChange() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"discovery\": null}");
+        JsonNode newNode = mapper.readTree("{\"discovery\": \"Relativity\"}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("\"Relativity\"", changes.get("discovery").toString());
+    }
+
+    @Test
+    void testTypeChange() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"year\": 1452}");
+        JsonNode newNode = mapper.readTree("{\"year\": \"1452\"}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("\"1452\"", changes.get("year").toString());
+    }
+
+    @Test
+    void testOrderPreservation() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"events\": [1066, 1215]}");
+        JsonNode newNode = mapper.readTree("{\"events\": [1066, 1220], \"dates\": [476, 800, 962]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(4, changes.size());
+        String[] expectedKeys = {"events[1]", "dates[0]", "dates[1]", "dates[2]"};
+        int i = 0;
+        for (String key : changes.keySet()) {
+            assertEquals(expectedKeys[i++], key);
+        }
+    }
+
+    @Test
+    void testInvalidPathInOldNode() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"cities\": [{\"name\": \"Rome\"}]}");
+        JsonNode newNode = mapper.readTree("{\"cities\": [{\"name\": \"Rome\", \"fall\": 476}]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("476", changes.get("cities[0].fall").toString());
+    }
+
+    @Test
+    void testArrayIndexOutOfBounds() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"armies\": [100, 200]}");
+        JsonNode newNode = mapper.readTree("{\"armies\": [100, 200, 300]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("300", changes.get("armies[2]").toString()); // Tests index bounds check
+    }
+
+    @Test
+    void testEmptyArrayAndObject() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"emptyArr\": [], \"emptyObj\": {}}");
+        JsonNode newNode = mapper.readTree("{\"emptyArr\": [], \"emptyObj\": {\"key\": \"value\"}}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(1, changes.size());
+        assertEquals("\"value\"", changes.get("emptyObj.key").toString());
+    }
+
+    @Test
+    void testTypeMismatchInPath() throws Exception {
+        JsonNode oldNode = mapper.readTree("{\"data\": {\"key\": 42}}");
+        JsonNode newNode = mapper.readTree("{\"data\": [1, 2, 3]}");
+        Map<String, JsonNode> changes = jsonDiff.getChanges(oldNode, newNode);
+        assertEquals(3, changes.size()); // Entire array is new due to type mismatch
+        assertEquals("1", changes.get("data[0]").toString());
+        assertEquals("2", changes.get("data[1]").toString());
+        assertEquals("3", changes.get("data[2]").toString());
+    }
+}
